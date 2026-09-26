@@ -238,34 +238,58 @@ class BlockingEngine:
             keys_to_remove = [k for k, v in index.items() if len(v) > max_postings]
             for k in keys_to_remove:
                 del index[k]
-        return dict(index)
+        
+        # Convert lists to numpy arrays for screaming fast bincount query
+        return {k: np.array(v, dtype=np.int32) for k, v in index.items()}
 
     def query_index(self, s1_rec, index):
-        hits = defaultdict(int)
+        hits_arrs = []
+        weights_arrs = []
+        
+        def add_hits(key, weight):
+            arr = index.get(key)
+            if arr is not None:
+                hits_arrs.append(arr)
+                weights_arrs.append(np.full(len(arr), weight, dtype=np.float32))
+
         postal = s1_rec.get("postal_code", "")
         if postal and len(postal) >= 4:
-            key = f"post:{postal}"
-            if key in index:
-                for idx in index[key]: hits[idx] += 5
+            add_hits(f"post:{postal}", 5.0)
+            
         for token in s1_rec.get("address_tokens", []):
             if len(token) >= 4 and token.lower() not in ADDRESS_STOPWORDS:
-                key = f"addr:{token}"
-                if key in index:
-                    for idx in index[key]: hits[idx] += 3
+                add_hits(f"addr:{token}", 3.0)
+                
         for token in s1_rec.get("name_tokens", []):
             if len(token) >= 3:
-                key = f"name:{token}"
-                if key in index:
-                    for idx in index[key]: hits[idx] += 2
+                add_hits(f"name:{token}", 2.0)
+                
         for num in s1_rec.get("address_numbers", []):
             if len(num) >= 2:
-                key = f"num:{num}"
-                if key in index:
-                    for idx in index[key]: hits[idx] += 2
-        if not hits:
+                add_hits(f"num:{num}", 2.0)
+                
+        if not hits_arrs:
             return []
-        sorted_hits = sorted(hits.items(), key=lambda x: x[1], reverse=True)
-        return [idx for idx, _ in sorted_hits[:self.top_k]]
+            
+        flat_hits = np.concatenate(hits_arrs)
+        flat_weights = np.concatenate(weights_arrs)
+        
+        # O(N) scoring using bincount instead of Python loops
+        scores = np.bincount(flat_hits, weights=flat_weights)
+        nonzero_idx = np.nonzero(scores)[0]
+        nonzero_scores = scores[nonzero_idx]
+        
+        if len(nonzero_idx) <= self.top_k:
+            sorted_args = np.argsort(-nonzero_scores)
+            return nonzero_idx[sorted_args].tolist()
+            
+        # O(N) top-K partitioning
+        k = self.top_k
+        partitioned = np.argpartition(-nonzero_scores, k - 1)[:k]
+        top_k_scores = nonzero_scores[partitioned]
+        sorted_top_k = np.argsort(-top_k_scores)
+        
+        return int(nonzero_idx[partitioned[sorted_top_k]]).tolist() if isinstance(nonzero_idx[partitioned[sorted_top_k]], int) else nonzero_idx[partitioned[sorted_top_k]].tolist()
 
 # ==============================================================================
 # D. FAST FEATURE ENGINEERING (26 Features)
