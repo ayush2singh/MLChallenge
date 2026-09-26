@@ -321,8 +321,11 @@ def compute_features(s1_rec, cand_rec, rank=1):
         name_len_ratio = min(len(s1_name), len(cand_name)) / ml if ml > 0 else 1.0
         s1c = s1_rec["name_chars"]
         s2c = cand_rec["name_chars"]
-        u = s1c | s2c
-        name_char_jaccard = len(s1c & s2c) / len(u) if u else 0.0
+        if s1c and s2c:
+            u = s1c | s2c
+            name_char_jaccard = len(s1c & s2c) / len(u) if u else 0.0
+        else:
+            name_char_jaccard = 0.0
         fw1, fw2 = s1_rec["fw"], cand_rec["fw"]
         name_first_word_jw = jw.similarity(fw1, fw2) if fw1 and fw2 else 0.0
     else:
@@ -355,7 +358,7 @@ def compute_features(s1_rec, cand_rec, rank=1):
     else:
         address_number_jaccard = address_number_conflict = 0.0
     
-    address_number_count_diff = abs(len(s1_nums) - len(c_nums))
+    address_number_count_diff = abs((len(s1_nums) if s1_nums else 0) - (len(c_nums) if c_nums else 0))
 
     s1_aw, c_aw = s1_rec["s1_aw"], cand_rec["s1_aw"]
     if s1_aw and c_aw:
@@ -650,21 +653,23 @@ def run_inference(model, best_tau, test_dir, output_dir):
         print(f"\n[2/4] Processing [{country}]: {len(s1_raws)} S1 remaining x {len(cand_raws)} candidates")
         t1 = time.time()
 
-        # Preprocess - THIS NOW COMPUTES ALL SETS FOR INSTANT O(1) LOOKUPS
-        s1_recs = [preprocess_record(r) for r in s1_raws]
+        # Preprocess candidates upfront (needed for inverted index + feature extraction)
         cand_recs = [preprocess_record(r) for r in cand_raws]
+        del cand_raws
+        gc.collect()
         
         cand_dict = {r["entity_id"]: r for r in cand_recs}
         cand_ids = [r["entity_id"] for r in cand_recs]
-
-        del s1_raws, cand_raws
-        gc.collect()
 
         # Build inverted index
         if cand_recs:
             inv_idx = blocker.build_inverted_index(cand_recs)
         else:
             inv_idx = {}
+
+        # Free cand_recs list (cand_dict still holds references)
+        del cand_recs
+        gc.collect()
 
         # Open files in append mode to stream outputs directly to disk
         f_cand = open(cand_path, "a", newline="", encoding="utf-8")
@@ -674,14 +679,15 @@ def run_inference(model, best_tau, test_dir, output_dir):
         w_match = csv.writer(f_match, delimiter="\t")
 
         try:
-            # Process S1 in batches
+            # Process S1 in batches — preprocess ON THE FLY to save ~8GB RAM
             batch_size = 10000
-            n_s1 = len(s1_recs)
+            n_s1 = len(s1_raws)
             total_scored = 0
 
             for batch_start in range(0, n_s1, batch_size):
                 batch_end = min(batch_start + batch_size, n_s1)
-                batch_recs = s1_recs[batch_start:batch_end]
+                # Preprocess only this batch of S1 (10k records at a time, not 810k)
+                batch_recs = [preprocess_record(r) for r in s1_raws[batch_start:batch_end]]
 
                 batch_feat_rows = []
                 batch_pk = []
@@ -732,8 +738,8 @@ def run_inference(model, best_tau, test_dir, output_dir):
                                     cp = crec.get("postal_code", "") or ""
                                     if sp and cp and len(sp) >= 5 and len(cp) >= 5 and sp != cp:
                                         continue
-                                    sn = s1_rec_v.get("s1_nums", set())
-                                    cn = crec.get("s1_nums", set())
+                                    sn = s1_rec_v.get("s1_nums") or set()
+                                    cn = crec.get("s1_nums") or set()
                                     if len(sn) >= 2 and len(cn) >= 2 and len(sn & cn) == 0:
                                         continue
                             valid.append(cand_id)
@@ -769,10 +775,7 @@ def run_inference(model, best_tau, test_dir, output_dir):
             f_match.close()
 
         # Clear memory for next country
-        cand_dict = None
-        inv_idx = None
-        cand_ids = None
-        del s1_recs, cand_recs
+        del s1_raws, cand_dict, inv_idx, cand_ids
         gc.collect()
 
     total_time = time.time() - t0
