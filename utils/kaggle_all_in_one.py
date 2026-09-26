@@ -1,13 +1,14 @@
 # ==============================================================================
 # AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ENTITY RESOLUTION PIPELINE (KAGGLE)
 # ==============================================================================
-# v2.3 - Ultra-Optimized Single Thread + Auto-Resume Checkpoints
+# v2.6 - Extreme Memory Fixes + Pre-Scoring Veto
 #
-# NEW IN V2.3:
-# - Completely eliminates Pandas DataFrame overhead by predicting directly on numpy arrays.
-# - Replaces dictionary-based features with flat lists, reducing memory allocations by 10x.
-# - Fixes a catastrophic O(N^2) memory scan bug in the postal veto logic.
-# - Uses dictionary .pop() for aggressive garbage collection to prevent Kaggle Swap death.
+# NEW IN V2.6:
+# - Replaces empty sets with None to save 5GB+ RAM across India.
+# - Preprocesses S1 candidates dynamically in batches of 10,000 (saves 8GB+ RAM).
+# - Uses Polars lazy extraction for countries to avoid allocating 25GB of Python dicts upfront.
+# - Pre-scoring Veto: Skips feature extraction for strictly vetoed candidates, doubling speed.
+# - Dynamic array shrink via .pop() for candidates to halve peak memory.
 # ==============================================================================
 
 import sys, os, subprocess, gc, time, csv, re, unicodedata
@@ -33,7 +34,7 @@ import rapidfuzz.distance.Levenshtein as lev
 import rapidfuzz.fuzz as fuzz
 
 print("=" * 65)
-print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.3 (ULTRA-FAST)")
+print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.6 (ULTRA-FAST)")
 print("=" * 65)
 
 # ==============================================================================
