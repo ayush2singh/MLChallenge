@@ -27,7 +27,6 @@ except ImportError:
     import lightgbm
 
 import numpy as np
-import pandas as pd
 from lightgbm import LGBMClassifier
 import rapidfuzz.distance.JaroWinkler as jw
 import rapidfuzz.distance.Levenshtein as lev
@@ -306,86 +305,96 @@ FEATURE_NAMES = [
 ]
 
 def compute_features(s1_rec, cand_rec, rank=1):
+    """Returns a flat list of 26 floats (same order as FEATURE_NAMES) for direct numpy ingestion."""
     s1_name = s1_rec["clean_name"]
     cand_name = cand_rec["clean_name"]
 
     if s1_name and cand_name:
-        jaro_winkler_sim = float(jw.similarity(s1_name, cand_name))
-        token_sort_ratio = float(fuzz.token_sort_ratio(s1_name, cand_name)) / 100.0
-        token_set_ratio = float(fuzz.token_set_ratio(s1_name, cand_name)) / 100.0
-        levenshtein_ratio = float(lev.normalized_similarity(s1_name, cand_name))
+        jaro_winkler_sim = jw.similarity(s1_name, cand_name)
+        token_sort_ratio = fuzz.token_sort_ratio(s1_name, cand_name) * 0.01
+        token_set_ratio = fuzz.token_set_ratio(s1_name, cand_name) * 0.01
+        levenshtein_ratio = lev.normalized_similarity(s1_name, cand_name)
         exact_name_match = 1.0 if s1_name == cand_name else 0.0
-        name_len_diff = float(abs(len(s1_name) - len(cand_name)))
+        name_len_diff = abs(len(s1_name) - len(cand_name))
         ml = max(len(s1_name), len(cand_name))
-        name_len_ratio = float(min(len(s1_name), len(cand_name))) / ml if ml > 0 else 1.0
+        name_len_ratio = min(len(s1_name), len(cand_name)) / ml if ml > 0 else 1.0
         s1c = s1_rec["name_chars"]
         s2c = cand_rec["name_chars"]
-        name_char_jaccard = len(s1c & s2c) / len(s1c | s2c) if (s1c | s2c) else 0.0
+        u = s1c | s2c
+        name_char_jaccard = len(s1c & s2c) / len(u) if u else 0.0
         fw1, fw2 = s1_rec["fw"], cand_rec["fw"]
-        name_first_word_jw = float(jw.similarity(fw1, fw2)) if fw1 and fw2 else 0.0
+        name_first_word_jw = jw.similarity(fw1, fw2) if fw1 and fw2 else 0.0
     else:
         jaro_winkler_sim = token_sort_ratio = token_set_ratio = levenshtein_ratio = 0.0
         exact_name_match = name_len_diff = name_len_ratio = name_char_jaccard = name_first_word_jw = 0.0
 
     s1_tok, c_tok = s1_rec["s1_tok"], cand_rec["s1_tok"]
-    name_token_jaccard = len(s1_tok & c_tok) / len(s1_tok | c_tok) if (s1_tok and c_tok) else 0.0
+    if s1_tok and c_tok:
+        u = s1_tok | c_tok
+        name_token_jaccard = len(s1_tok & c_tok) / len(u) if u else 0.0
+    else:
+        name_token_jaccard = 0.0
 
     s1_addr, c_addr = s1_rec["clean_address"], cand_rec["clean_address"]
     address_has_missing = 1.0 if (not s1_addr or not c_addr) else 0.0
 
     s1_post, c_post = s1_rec["postal_code"], cand_rec["postal_code"]
     if s1_post and c_post:
-        postal_code_match = 1.0 if s1_post == c_post else -1.0
-        postal_exact_binary = 1.0 if s1_post == c_post else 0.0
+        pm = s1_post == c_post
+        postal_code_match = 1.0 if pm else -1.0
+        postal_exact_binary = 1.0 if pm else 0.0
     else:
         postal_code_match = postal_exact_binary = 0.0
 
     s1_nums, c_nums = s1_rec["s1_nums"], cand_rec["s1_nums"]
     if s1_nums and c_nums:
-        address_number_jaccard = len(s1_nums & c_nums) / len(s1_nums | c_nums)
-        address_number_conflict = 1.0 if len(s1_nums & c_nums) == 0 else 0.0
+        isect = len(s1_nums & c_nums)
+        address_number_jaccard = isect / len(s1_nums | c_nums)
+        address_number_conflict = 1.0 if isect == 0 else 0.0
     else:
         address_number_jaccard = address_number_conflict = 0.0
     
-    address_number_count_diff = float(abs(len(s1_nums) - len(c_nums)))
+    address_number_count_diff = abs(len(s1_nums) - len(c_nums))
 
     s1_aw, c_aw = s1_rec["s1_aw"], cand_rec["s1_aw"]
-    address_token_overlap = len(s1_aw & c_aw) / len(s1_aw | c_aw) if (s1_aw and c_aw) else 0.0
+    if s1_aw and c_aw:
+        u = s1_aw | c_aw
+        address_token_overlap = len(s1_aw & c_aw) / len(u) if u else 0.0
+    else:
+        address_token_overlap = 0.0
 
     if s1_addr and c_addr:
-        address_levenshtein_ratio = float(lev.normalized_similarity(s1_addr, c_addr))
-        address_jaro_winkler = float(jw.similarity(s1_addr, c_addr))
+        address_levenshtein_ratio = lev.normalized_similarity(s1_addr, c_addr)
+        address_jaro_winkler = jw.similarity(s1_addr, c_addr)
     else:
         address_levenshtein_ratio = address_jaro_winkler = 0.0
 
     s1_dg, c_dg = s1_rec["s1_dg"], cand_rec["s1_dg"]
-    digit_overlap_ratio = len(s1_dg & c_dg) / len(s1_dg | c_dg) if (s1_dg and c_dg) else 0.0
+    if s1_dg and c_dg:
+        u = s1_dg | c_dg
+        digit_overlap_ratio = len(s1_dg & c_dg) / len(u) if u else 0.0
+    else:
+        digit_overlap_ratio = 0.0
 
     s1_comb, c_comb = s1_rec["s1_comb"], cand_rec["s1_comb"]
-    combined_jw = float(jw.similarity(s1_comb, c_comb)) if (s1_comb and c_comb) else 0.0
+    combined_jw = jw.similarity(s1_comb, c_comb) if (s1_comb and c_comb) else 0.0
 
     cand_id = cand_rec.get("entity_id", "") or ""
     
-    return {
-        "jaro_winkler_sim": jaro_winkler_sim, "token_sort_ratio": token_sort_ratio,
-        "token_set_ratio": token_set_ratio, "levenshtein_ratio": levenshtein_ratio,
-        "exact_name_match": exact_name_match, "name_len_diff": name_len_diff,
-        "name_len_ratio": name_len_ratio, "name_token_jaccard": name_token_jaccard,
-        "name_first_word_jw": name_first_word_jw, "name_char_jaccard": name_char_jaccard,
-        "postal_code_match": postal_code_match, "postal_exact_binary": postal_exact_binary,
-        "address_number_jaccard": address_number_jaccard,
-        "address_number_conflict": address_number_conflict,
-        "address_token_overlap": address_token_overlap,
-        "address_levenshtein_ratio": address_levenshtein_ratio,
-        "address_jaro_winkler": address_jaro_winkler, "address_has_missing": address_has_missing,
-        "digit_overlap_ratio": digit_overlap_ratio, "combined_jw": combined_jw,
-        "name_has_non_latin": cand_rec["name_has_non_latin"],
-        "address_number_count_diff": address_number_count_diff,
-        "is_source2": 1.0 if cand_id.startswith("S2-") else 0.0,
-        "is_source3": 1.0 if cand_id.startswith("S3-") else 0.0,
-        "blocking_rank": float(rank),
-        "blocking_rank_inv": 1.0 / float(rank) if rank > 0 else 1.0,
-    }
+    # Return flat list matching FEATURE_NAMES order — avoids dict allocation overhead
+    return [
+        jaro_winkler_sim, token_sort_ratio, token_set_ratio, levenshtein_ratio,
+        exact_name_match, name_len_diff, name_len_ratio, name_token_jaccard,
+        name_first_word_jw, name_char_jaccard,
+        postal_code_match, postal_exact_binary, address_number_jaccard,
+        address_number_conflict, address_token_overlap, address_levenshtein_ratio,
+        address_jaro_winkler, address_has_missing, digit_overlap_ratio,
+        combined_jw, cand_rec["name_has_non_latin"], address_number_count_diff,
+        1.0 if cand_id.startswith("S2-") else 0.0,
+        1.0 if cand_id.startswith("S3-") else 0.0,
+        float(rank),
+        1.0 / rank if rank > 0 else 1.0,
+    ]
 
 
 # ==============================================================================
@@ -489,7 +498,7 @@ def train_model(train_dir, sample_size=50000):
                     feature_rows.append(compute_features(s1_rec, crec, rank))
                     labels.append(0)
 
-    X_train = pd.DataFrame(feature_rows)[FEATURE_NAMES]
+    X_train = np.array(feature_rows, dtype=np.float64)
     y_train = np.array(labels, dtype=int)
     n_pos = int(y_train.sum())
     print(f"  Training set: {len(X_train)} pairs ({n_pos} pos, {len(X_train)-n_pos} neg) in {time.time()-t1:.1f}s")
@@ -505,7 +514,7 @@ def train_model(train_dir, sample_size=50000):
         min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
         reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbose=-1, n_jobs=-1
     )
-    model.fit(X_train[FEATURE_NAMES], y_train)
+    model.fit(X_train, y_train)
     print(f"  Model trained in {time.time()-t1:.1f}s")
 
     # Calibrate threshold on training data (use last 20% as validation)
@@ -526,8 +535,8 @@ def train_model(train_dir, sample_size=50000):
                 val_pk.append((s1_id, cand_id))
 
     if val_feat_rows:
-        X_val = pd.DataFrame(val_feat_rows)[FEATURE_NAMES]
-        probs = model.predict_proba(X_val[FEATURE_NAMES])[:, 1]
+        X_val = np.array(val_feat_rows, dtype=np.float64)
+        probs = model.predict_proba(X_val)[:, 1]
 
         s1_cand_probs = defaultdict(list)
         for (s1_id, cand_id), p in zip(val_pk, probs):
@@ -699,26 +708,25 @@ def run_inference(model, best_tau, test_dir, output_dir):
                 # Score batch
                 all_matches_batch = {}
                 if batch_feat_rows:
-                    X_batch = pd.DataFrame(batch_feat_rows)[FEATURE_NAMES]
-                    probs = model.predict_proba(X_batch[FEATURE_NAMES])[:, 1]
+                    X_batch = np.array(batch_feat_rows, dtype=np.float64)
+                    probs = model.predict_proba(X_batch)[:, 1]
 
                     # Group by S1 and apply threshold + veto
                     s1_scored = defaultdict(list)
                     for (s1_id, cand_id), p in zip(batch_pk, probs):
                         s1_scored[s1_id].append((cand_id, float(p)))
 
+                    # Build O(1) lookup for S1 records (fixes O(N^2) linear scan bug)
+                    s1_rec_map = {r["entity_id"]: r for r in batch_recs}
+
                     for s1_id in batch_s1_ids:
                         candidates = s1_scored.get(s1_id, [])
                         valid = []
-                        for cand_id, prob in sorted(candidates, key=lambda x: x[1], reverse=True):
+                        s1_rec_v = s1_rec_map.get(s1_id)
+                        for cand_id, prob in candidates:
                             if prob < best_tau:
                                 continue
                             # Smart postal veto
-                            s1_rec_v = None
-                            for r in batch_recs:
-                                if r["entity_id"] == s1_id:
-                                    s1_rec_v = r
-                                    break
                             if s1_rec_v:
                                 crec = cand_dict.get(cand_id)
                                 if crec:
