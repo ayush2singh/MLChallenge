@@ -177,7 +177,7 @@ def preprocess_record(record):
 
     # ==============================================================
     # PRECOMPUTE SETS & STRINGS ONCE FOR FAST FEATURE EXTRACTION
-    # Replacing empty sets with None saves ~5GB of RAM across 5.5M records
+    # Empty set() = 216 bytes; None = 16 bytes. Saves ~5GB across 5.5M records.
     # ==============================================================
     s1_tok = set(t for t in name_tokens if not t.startswith("pfx:")) or None
     fw = _first_word(core_name)
@@ -197,7 +197,7 @@ def preprocess_record(record):
         "address_tokens": addr_tokens,
         "address_numbers": numbers,
         
-        # O(1) Lookup fields
+        # O(1) Lookup fields (None instead of empty set saves 200 bytes each)
         "s1_tok": s1_tok,
         "fw": fw,
         "s1_aw": s1_aw,
@@ -626,21 +626,23 @@ def run_inference(model, best_tau, test_dir, output_dir):
         ts1 = ts1.filter(~pl.col("entity_id").is_in(list(processed_s1_ids)))
         print(f"  Test S1 remaining after filtering: {ts1.height}")
 
-    # Clean countries column for filtering
-    ts1 = ts1.with_columns(pl.col("country").str.to_lowercase().str.strip().alias("country"))
+    # Clean countries column for filtering - keep data in Polars to save ~15GB RAM
+    ts1 = ts1.with_columns(pl.col("country").str.to_lowercase().str.strip_chars().alias("_country"))
     cand_all = pl.concat([ts2, ts3]).unique(subset=["entity_id"])
-    cand_all = cand_all.with_columns(pl.col("country").str.to_lowercase().str.strip().alias("country"))
+    cand_all = cand_all.with_columns(pl.col("country").str.to_lowercase().str.strip_chars().alias("_country"))
     del ts2, ts3
     gc.collect()
 
-    countries = sorted(list(set(ts1["country"].unique().to_list() + cand_all["country"].unique().to_list())))
+    countries = sorted(list(set(
+        ts1["_country"].unique().to_list() + cand_all["_country"].unique().to_list()
+    )))
     
     blocker = BlockingEngine(top_k=50)
 
     for country in countries:
-        # Extract only this country directly from Polars (Saves ~10GB RAM)
-        s1_raws = ts1.filter(pl.col("country") == country).to_dicts()
-        cand_raws = cand_all.filter(pl.col("country") == country).to_dicts()
+        # Extract only this country's data from Polars (saves ~15GB RAM vs pre-converting all)
+        s1_raws = ts1.filter(pl.col("_country") == country).to_dicts()
+        cand_raws = cand_all.filter(pl.col("_country") == country).to_dicts()
 
         if not s1_raws:
             continue
