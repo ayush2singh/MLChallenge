@@ -1,18 +1,17 @@
 # ==============================================================================
 # AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ENTITY RESOLUTION PIPELINE (KAGGLE)
 # ==============================================================================
-# v2.1 - Address-First Blocking + 26 Features + All-Negatives + Multiprocessing
+# v2.2 - Ultra-Optimized Single Thread + Auto-Resume Checkpoints
 #
-# NEW IN V2.1:
-# - Multiprocessing: 4x speedup during inference using mp.Pool
-# - Auto-Resume: Checkpoints progress to disk dynamically. If stopped, it 
-#   resumes exactly where it left off.
+# NEW IN V2.2:
+# - Pre-computes all sets/strings once during preprocessing to avoid redundant
+#   calculations inside the 50x inner loop.
+# - Reverted to single-threaded to avoid OOM memory duplication and GIL locking,
+#   relying purely on algorithmic speedups to achieve massive performance gains.
 # ==============================================================================
 
 import sys, os, subprocess, gc, time, csv, re, unicodedata
 from collections import defaultdict
-import multiprocessing as mp
-from multiprocessing.dummy import Pool as ThreadPool
 from typing import Dict, List, Set, Tuple, Optional, Any
 
 # 1. Install dependencies automatically if missing
@@ -35,7 +34,7 @@ import rapidfuzz.distance.Levenshtein as lev
 import rapidfuzz.fuzz as fuzz
 
 print("=" * 65)
-print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.1 (MULTIPROCESSING)")
+print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.2 (ULTRA-FAST)")
 print("=" * 65)
 
 # ==============================================================================
@@ -128,6 +127,12 @@ def strip_legal_suffixes(name):
         stripped = new_stripped
     return stripped if stripped else name
 
+def _first_word(name):
+    for w in name.split():
+        if len(w) >= 3 and w not in BUSINESS_STOPWORDS:
+            return w
+    parts = name.split()
+    return parts[0] if parts else ""
 
 def extract_postal_code(address, country=None):
     if not address:
@@ -171,17 +176,36 @@ def preprocess_record(record):
             name_tokens.append(f"pfx:{w[:3]}")
             name_tokens.append(f"pfx:{w[:4]}")
 
+    # ==============================================================
+    # PRECOMPUTE SETS & STRINGS ONCE FOR FAST FEATURE EXTRACTION
+    # ==============================================================
+    s1_tok = set(t for t in name_tokens if not t.startswith("pfx:"))
+    fw = _first_word(core_name)
+    s1_aw = set(addr_tokens)
+    s1_nums = set(numbers)
+    s1_comb = f"{core_name} {clean_address}".strip()
+    s1_dg = set(RE_ALL_DIGITS.findall(f"{name or ''} {addr or ''}"))
+    name_has_non_latin = 1.0 if RE_NON_LATIN.search(name or "") else 0.0
+
     return {
         "entity_id": record.get("entity_id", ""),
         "country": country,
-        "raw_name": name or "",
         "clean_name": core_name,
-        "full_clean_name": norm_name,
         "clean_address": clean_address,
         "postal_code": postal,
-        "address_numbers": numbers,
-        "address_tokens": addr_tokens,
         "name_tokens": name_tokens,
+        "address_tokens": addr_tokens,
+        "address_numbers": numbers,
+        
+        # O(1) Lookup fields
+        "s1_tok": s1_tok,
+        "fw": fw,
+        "s1_aw": s1_aw,
+        "s1_nums": s1_nums,
+        "s1_comb": s1_comb,
+        "s1_dg": s1_dg,
+        "name_has_non_latin": name_has_non_latin,
+        "name_chars": set(core_name)
     }
 
 # ==============================================================================
@@ -244,7 +268,7 @@ class BlockingEngine:
         return [idx for idx, _ in sorted_hits[:self.top_k]]
 
 # ==============================================================================
-# D. FEATURE ENGINEERING (26 Features)
+# D. FAST FEATURE ENGINEERING (26 Features)
 # ==============================================================================
 FEATURE_NAMES = [
     "jaro_winkler_sim", "token_sort_ratio", "token_set_ratio", "levenshtein_ratio",
@@ -257,18 +281,9 @@ FEATURE_NAMES = [
     "is_source2", "is_source3", "blocking_rank", "blocking_rank_inv",
 ]
 
-
-def _first_word(name):
-    for w in name.split():
-        if len(w) >= 3 and w not in BUSINESS_STOPWORDS:
-            return w
-    parts = name.split()
-    return parts[0] if parts else ""
-
-
 def compute_features(s1_rec, cand_rec, rank=1):
-    s1_name = s1_rec.get("clean_name", "") or ""
-    cand_name = cand_rec.get("clean_name", "") or ""
+    s1_name = s1_rec["clean_name"]
+    cand_name = cand_rec["clean_name"]
 
     if s1_name and cand_name:
         jaro_winkler_sim = float(jw.similarity(s1_name, cand_name))
@@ -279,45 +294,38 @@ def compute_features(s1_rec, cand_rec, rank=1):
         name_len_diff = float(abs(len(s1_name) - len(cand_name)))
         ml = max(len(s1_name), len(cand_name))
         name_len_ratio = float(min(len(s1_name), len(cand_name))) / ml if ml > 0 else 1.0
-        s1c, s2c = set(s1_name), set(cand_name)
+        s1c = s1_rec["name_chars"]
+        s2c = cand_rec["name_chars"]
         name_char_jaccard = len(s1c & s2c) / len(s1c | s2c) if (s1c | s2c) else 0.0
-        fw1, fw2 = _first_word(s1_name), _first_word(cand_name)
+        fw1, fw2 = s1_rec["fw"], cand_rec["fw"]
         name_first_word_jw = float(jw.similarity(fw1, fw2)) if fw1 and fw2 else 0.0
     else:
         jaro_winkler_sim = token_sort_ratio = token_set_ratio = levenshtein_ratio = 0.0
-        exact_name_match = 0.0
-        name_len_diff = float(abs(len(s1_name) - len(cand_name)))
-        name_len_ratio = name_char_jaccard = name_first_word_jw = 0.0
+        exact_name_match = name_len_diff = name_len_ratio = name_char_jaccard = name_first_word_jw = 0.0
 
-    s1_tok = set(t for t in s1_rec.get("name_tokens", []) if not t.startswith("pfx:"))
-    c_tok = set(t for t in cand_rec.get("name_tokens", []) if not t.startswith("pfx:"))
-    if s1_tok and c_tok:
-        name_token_jaccard = len(s1_tok & c_tok) / len(s1_tok | c_tok)
-    else:
-        name_token_jaccard = 0.0
+    s1_tok, c_tok = s1_rec["s1_tok"], cand_rec["s1_tok"]
+    name_token_jaccard = len(s1_tok & c_tok) / len(s1_tok | c_tok) if (s1_tok and c_tok) else 0.0
 
-    s1_addr = s1_rec.get("clean_address", "") or ""
-    c_addr = cand_rec.get("clean_address", "") or ""
+    s1_addr, c_addr = s1_rec["clean_address"], cand_rec["clean_address"]
     address_has_missing = 1.0 if (not s1_addr or not c_addr) else 0.0
 
-    s1_post = s1_rec.get("postal_code", "") or ""
-    c_post = cand_rec.get("postal_code", "") or ""
+    s1_post, c_post = s1_rec["postal_code"], cand_rec["postal_code"]
     if s1_post and c_post:
         postal_code_match = 1.0 if s1_post == c_post else -1.0
         postal_exact_binary = 1.0 if s1_post == c_post else 0.0
     else:
         postal_code_match = postal_exact_binary = 0.0
 
-    s1_nums = set(s1_rec.get("address_numbers", []))
-    c_nums = set(cand_rec.get("address_numbers", []))
+    s1_nums, c_nums = s1_rec["s1_nums"], cand_rec["s1_nums"]
     if s1_nums and c_nums:
         address_number_jaccard = len(s1_nums & c_nums) / len(s1_nums | c_nums)
         address_number_conflict = 1.0 if len(s1_nums & c_nums) == 0 else 0.0
     else:
         address_number_jaccard = address_number_conflict = 0.0
+    
+    address_number_count_diff = float(abs(len(s1_nums) - len(c_nums)))
 
-    s1_aw = set(w for w in s1_addr.split() if len(w) >= 2 and w not in BUSINESS_STOPWORDS)
-    c_aw = set(w for w in c_addr.split() if len(w) >= 2 and w not in BUSINESS_STOPWORDS)
+    s1_aw, c_aw = s1_rec["s1_aw"], cand_rec["s1_aw"]
     address_token_overlap = len(s1_aw & c_aw) / len(s1_aw | c_aw) if (s1_aw and c_aw) else 0.0
 
     if s1_addr and c_addr:
@@ -326,21 +334,14 @@ def compute_features(s1_rec, cand_rec, rank=1):
     else:
         address_levenshtein_ratio = address_jaro_winkler = 0.0
 
-    s1_all = f"{s1_rec.get('raw_name', '')} {s1_addr}"
-    c_all = f"{cand_rec.get('raw_name', '')} {c_addr}"
-    s1_dg = set(RE_ALL_DIGITS.findall(s1_all))
-    c_dg = set(RE_ALL_DIGITS.findall(c_all))
+    s1_dg, c_dg = s1_rec["s1_dg"], cand_rec["s1_dg"]
     digit_overlap_ratio = len(s1_dg & c_dg) / len(s1_dg | c_dg) if (s1_dg and c_dg) else 0.0
 
-    address_number_count_diff = float(abs(len(s1_nums) - len(c_nums)))
-
-    s1_comb = f"{s1_name} {s1_addr}".strip()
-    c_comb = f"{cand_name} {c_addr}".strip()
+    s1_comb, c_comb = s1_rec["s1_comb"], cand_rec["s1_comb"]
     combined_jw = float(jw.similarity(s1_comb, c_comb)) if (s1_comb and c_comb) else 0.0
 
-    name_has_non_latin = 1.0 if RE_NON_LATIN.search(cand_rec.get("raw_name", "") or "") else 0.0
-
     cand_id = cand_rec.get("entity_id", "") or ""
+    
     return {
         "jaro_winkler_sim": jaro_winkler_sim, "token_sort_ratio": token_sort_ratio,
         "token_set_ratio": token_set_ratio, "levenshtein_ratio": levenshtein_ratio,
@@ -354,13 +355,14 @@ def compute_features(s1_rec, cand_rec, rank=1):
         "address_levenshtein_ratio": address_levenshtein_ratio,
         "address_jaro_winkler": address_jaro_winkler, "address_has_missing": address_has_missing,
         "digit_overlap_ratio": digit_overlap_ratio, "combined_jw": combined_jw,
-        "name_has_non_latin": name_has_non_latin,
+        "name_has_non_latin": cand_rec["name_has_non_latin"],
         "address_number_count_diff": address_number_count_diff,
         "is_source2": 1.0 if cand_id.startswith("S2-") else 0.0,
         "is_source3": 1.0 if cand_id.startswith("S3-") else 0.0,
         "blocking_rank": float(rank),
         "blocking_rank_inv": 1.0 / float(rank) if rank > 0 else 1.0,
     }
+
 
 # ==============================================================================
 # E. TRAINING PIPELINE
@@ -539,43 +541,17 @@ def train_model(train_dir, sample_size=50000):
 
 
 # ==============================================================================
-# F. STREAMING INFERENCE PIPELINE (MULTIPROCESSING)
+# F. STREAMING INFERENCE PIPELINE (SINGLE-THREAD OPTIMIZED)
 # ==============================================================================
 
-# Global variables so worker processes can read them without IPC overhead
-g_inv_idx = None
-g_cand_dict = None
-g_cand_ids = None
-g_blocker = None
-
-def _mp_worker(s1_rec):
-    """Worker function for multiprocessing."""
-    s1_id = s1_rec["entity_id"]
-    if not g_cand_dict or not g_inv_idx:
-        return s1_id, [], [], []
-        
-    hits = g_blocker.query_index(s1_rec, g_inv_idx)
-    cand_list = [g_cand_ids[i] for i in hits]
-    
-    feat_rows = []
-    pk = []
-    for rank, cand_id in enumerate(cand_list, 1):
-        crec = g_cand_dict.get(cand_id)
-        if crec:
-            feat_rows.append(compute_features(s1_rec, crec, rank))
-            pk.append((s1_id, cand_id))
-            
-    return s1_id, cand_list, pk, feat_rows
-
-
 def run_inference(model, best_tau, test_dir, output_dir):
-    """Run inference on test set with country-partitioned streaming and multiprocessing."""
+    """Run inference on test set with country-partitioned streaming and fast single thread."""
     t0 = time.time()
     cand_path = os.path.join(output_dir, "candidate_pairs.tsv")
     match_path = os.path.join(output_dir, "matching_results.tsv")
 
     print(f"\n{'='*60}")
-    print("STREAMING INFERENCE PIPELINE (MULTIPROCESSING)")
+    print("STREAMING INFERENCE PIPELINE (ULTRA-FAST)")
     print(f"{'='*60}")
     
     # Check for existing checkpoint files for auto-resume
@@ -586,7 +562,6 @@ def run_inference(model, best_tau, test_dir, output_dir):
             processed_df = pl.read_csv(match_path, separator="\t")
             processed_s1_ids = set(processed_df["source1_entity_id"].to_list())
             print(f"  Resuming from {len(processed_s1_ids)} previously processed entities.")
-            # Ensure files are opened in append mode later
             file_mode = "a"
         except Exception as e:
             print(f"  Error reading existing files: {e}. Starting fresh.")
@@ -632,12 +607,7 @@ def run_inference(model, best_tau, test_dir, output_dir):
 
     countries = sorted(set(list(s1_by_country.keys()) + list(cand_by_country.keys())))
     
-    global g_inv_idx, g_cand_dict, g_cand_ids, g_blocker
-    g_blocker = BlockingEngine(top_k=50)
-
-    # Use multiprocessing Pool
-    num_cores = max(1, mp.cpu_count() - 1)
-    print(f"  Using {num_cores} cores for multiprocessing")
+    blocker = BlockingEngine(top_k=50)
 
     for country in countries:
         s1_raws = s1_by_country.get(country, [])
@@ -649,22 +619,21 @@ def run_inference(model, best_tau, test_dir, output_dir):
         print(f"\n[2/4] Processing [{country}]: {len(s1_raws)} S1 remaining x {len(cand_raws)} candidates")
         t1 = time.time()
 
-        # Preprocess
+        # Preprocess - THIS NOW COMPUTES ALL SETS FOR INSTANT O(1) LOOKUPS
         s1_recs = [preprocess_record(r) for r in s1_raws]
         cand_recs = [preprocess_record(r) for r in cand_raws]
         
-        # Set globals for workers
-        g_cand_dict = {r["entity_id"]: r for r in cand_recs}
-        g_cand_ids = [r["entity_id"] for r in cand_recs]
+        cand_dict = {r["entity_id"]: r for r in cand_recs}
+        cand_ids = [r["entity_id"] for r in cand_recs]
 
         del s1_raws, cand_raws
         gc.collect()
 
         # Build inverted index
         if cand_recs:
-            g_inv_idx = g_blocker.build_inverted_index(cand_recs)
+            inv_idx = blocker.build_inverted_index(cand_recs)
         else:
-            g_inv_idx = {}
+            inv_idx = {}
 
         # Open files in append mode to stream outputs directly to disk
         f_cand = open(cand_path, "a", newline="", encoding="utf-8")
@@ -679,95 +648,100 @@ def run_inference(model, best_tau, test_dir, output_dir):
             n_s1 = len(s1_recs)
             total_scored = 0
 
-            with ThreadPool(processes=num_cores) as pool:
-                for batch_start in range(0, n_s1, batch_size):
-                    batch_end = min(batch_start + batch_size, n_s1)
-                    batch_recs = s1_recs[batch_start:batch_end]
+            for batch_start in range(0, n_s1, batch_size):
+                batch_end = min(batch_start + batch_size, n_s1)
+                batch_recs = s1_recs[batch_start:batch_end]
 
-                    batch_feat_rows = []
-                    batch_pk = []
-                    batch_s1_ids = []
-                    batch_cand_pairs = {}
+                batch_feat_rows = []
+                batch_pk = []
+                batch_s1_ids = []
+                batch_cand_pairs = {}
+                
+                # Ultra-Fast Single Thread Loop
+                for s1_rec in batch_recs:
+                    s1_id = s1_rec["entity_id"]
+                    batch_s1_ids.append(s1_id)
                     
-                    # Run workers in parallel
-                    results = pool.map(_mp_worker, batch_recs)
+                    hits = blocker.query_index(s1_rec, inv_idx)
+                    cand_list = [cand_ids[i] for i in hits]
+                    batch_cand_pairs[s1_id] = cand_list
                     
-                    for s1_id, cand_list, pk, feat_rows in results:
-                        batch_s1_ids.append(s1_id)
-                        batch_cand_pairs[s1_id] = cand_list
-                        batch_pk.extend(pk)
-                        batch_feat_rows.extend(feat_rows)
+                    for rank, cand_id in enumerate(cand_list, 1):
+                        crec = cand_dict.get(cand_id)
+                        if crec:
+                            batch_feat_rows.append(compute_features(s1_rec, crec, rank))
+                            batch_pk.append((s1_id, cand_id))
 
-                    # Score batch
-                    all_matches_batch = {}
-                    if batch_feat_rows:
-                        X_batch = pd.DataFrame(batch_feat_rows)[FEATURE_NAMES]
-                        probs = model.predict_proba(X_batch[FEATURE_NAMES])[:, 1]
+                # Score batch
+                all_matches_batch = {}
+                if batch_feat_rows:
+                    X_batch = pd.DataFrame(batch_feat_rows)[FEATURE_NAMES]
+                    probs = model.predict_proba(X_batch[FEATURE_NAMES])[:, 1]
 
-                        # Group by S1 and apply threshold + veto
-                        s1_scored = defaultdict(list)
-                        for (s1_id, cand_id), p in zip(batch_pk, probs):
-                            s1_scored[s1_id].append((cand_id, float(p)))
+                    # Group by S1 and apply threshold + veto
+                    s1_scored = defaultdict(list)
+                    for (s1_id, cand_id), p in zip(batch_pk, probs):
+                        s1_scored[s1_id].append((cand_id, float(p)))
 
-                        for s1_id in batch_s1_ids:
-                            candidates = s1_scored.get(s1_id, [])
-                            valid = []
-                            for cand_id, prob in sorted(candidates, key=lambda x: x[1], reverse=True):
-                                if prob < best_tau:
-                                    continue
-                                # Smart postal veto
-                                s1_rec_v = None
-                                for r in batch_recs:
-                                    if r["entity_id"] == s1_id:
-                                        s1_rec_v = r
-                                        break
-                                if s1_rec_v:
-                                    crec = g_cand_dict.get(cand_id)
-                                    if crec:
-                                        sp = s1_rec_v.get("postal_code", "") or ""
-                                        cp = crec.get("postal_code", "") or ""
-                                        if sp and cp and len(sp) >= 5 and len(cp) >= 5 and sp != cp:
-                                            continue
-                                        sn = set(s1_rec_v.get("address_numbers", []))
-                                        cn = set(crec.get("address_numbers", []))
-                                        if len(sn) >= 2 and len(cn) >= 2 and len(sn & cn) == 0:
-                                            continue
-                                valid.append(cand_id)
-                            all_matches_batch[s1_id] = valid
-                    else:
-                        for s1_id in batch_s1_ids:
-                            all_matches_batch[s1_id] = []
-
-                    # Flush batch to disk immediately
                     for s1_id in batch_s1_ids:
-                        # Write Candidate pairs
-                        cands = batch_cand_pairs.get(s1_id, [])
-                        seen = set()
-                        unique_cands = [c for c in cands if not (c in seen or seen.add(c))]
-                        w_cand.writerow([s1_id, ",".join(unique_cands)])
-                        
-                        # Write Matched pairs
-                        matches = all_matches_batch.get(s1_id, [])
-                        seen_m = set()
-                        unique_matches = [m for m in matches if not (m in seen_m or seen_m.add(m))]
-                        w_match.writerow([s1_id, ",".join(unique_matches)])
+                        candidates = s1_scored.get(s1_id, [])
+                        valid = []
+                        for cand_id, prob in sorted(candidates, key=lambda x: x[1], reverse=True):
+                            if prob < best_tau:
+                                continue
+                            # Smart postal veto
+                            s1_rec_v = None
+                            for r in batch_recs:
+                                if r["entity_id"] == s1_id:
+                                    s1_rec_v = r
+                                    break
+                            if s1_rec_v:
+                                crec = cand_dict.get(cand_id)
+                                if crec:
+                                    sp = s1_rec_v.get("postal_code", "") or ""
+                                    cp = crec.get("postal_code", "") or ""
+                                    if sp and cp and len(sp) >= 5 and len(cp) >= 5 and sp != cp:
+                                        continue
+                                    sn = s1_rec_v.get("s1_nums", set())
+                                    cn = crec.get("s1_nums", set())
+                                    if len(sn) >= 2 and len(cn) >= 2 and len(sn & cn) == 0:
+                                        continue
+                            valid.append(cand_id)
+                        all_matches_batch[s1_id] = valid
+                else:
+                    for s1_id in batch_s1_ids:
+                        all_matches_batch[s1_id] = []
 
-                    f_cand.flush()
-                    f_match.flush()
-                    total_scored += len(batch_feat_rows)
+                # Flush batch to disk immediately
+                for s1_id in batch_s1_ids:
+                    # Write Candidate pairs
+                    cands = batch_cand_pairs.get(s1_id, [])
+                    seen = set()
+                    unique_cands = [c for c in cands if not (c in seen or seen.add(c))]
+                    w_cand.writerow([s1_id, ",".join(unique_cands)])
+                    
+                    # Write Matched pairs
+                    matches = all_matches_batch.get(s1_id, [])
+                    seen_m = set()
+                    unique_matches = [m for m in matches if not (m in seen_m or seen_m.add(m))]
+                    w_match.writerow([s1_id, ",".join(unique_matches)])
 
-                    if (batch_end % 40000 == 0) or batch_end == n_s1:
-                        elapsed = time.time() - t1
-                        print(f"    [{country}] {batch_end}/{n_s1} entities, {total_scored} pairs scored ({elapsed:.0f}s)")
+                f_cand.flush()
+                f_match.flush()
+                total_scored += len(batch_feat_rows)
+
+                if (batch_end % 40000 == 0) or batch_end == n_s1:
+                    elapsed = time.time() - t1
+                    print(f"    [{country}] {batch_end}/{n_s1} entities, {total_scored} pairs scored ({elapsed:.0f}s)")
                         
         finally:
             f_cand.close()
             f_match.close()
 
         # Clear memory for next country
-        g_cand_dict = None
-        g_inv_idx = None
-        g_cand_ids = None
+        cand_dict = None
+        inv_idx = None
+        cand_ids = None
         del s1_recs, cand_recs
         gc.collect()
 
@@ -838,7 +812,6 @@ def validate_outputs(match_path, cand_path, test_dir):
 # H. MAIN
 # ==============================================================================
 if __name__ == "__main__":
-    mp.set_start_method('fork', force=True)  # Ensure fork is used for memory inheritance
     print(f"\nStarting pipeline at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Step 1: Train model
