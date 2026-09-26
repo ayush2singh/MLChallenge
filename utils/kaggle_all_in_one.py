@@ -654,8 +654,10 @@ def run_inference(model, best_tau, test_dir, output_dir):
         t1 = time.time()
 
         # Preprocess candidates upfront (needed for inverted index + feature extraction)
-        cand_recs = [preprocess_record(r) for r in cand_raws]
-        del cand_raws
+        # Dynamically shrink cand_raws via .pop() to halve peak memory!
+        cand_recs = []
+        while cand_raws:
+            cand_recs.append(preprocess_record(cand_raws.pop()))
         gc.collect()
         
         cand_dict = {r["entity_id"]: r for r in cand_recs}
