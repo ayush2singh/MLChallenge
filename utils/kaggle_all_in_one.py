@@ -634,8 +634,8 @@ def run_inference(model, best_tau, test_dir, output_dir):
     blocker = BlockingEngine(top_k=50)
 
     for country in countries:
-        s1_raws = s1_by_country.get(country, [])
-        cand_raws = cand_by_country.get(country, [])
+        s1_raws = s1_by_country.pop(country, [])
+        cand_raws = cand_by_country.pop(country, [])
 
         if not s1_raws:
             continue
@@ -668,7 +668,7 @@ def run_inference(model, best_tau, test_dir, output_dir):
 
         try:
             # Process S1 in batches
-            batch_size = 20000
+            batch_size = 10000
             n_s1 = len(s1_recs)
             total_scored = 0
 
@@ -754,7 +754,7 @@ def run_inference(model, best_tau, test_dir, output_dir):
                 f_match.flush()
                 total_scored += len(batch_feat_rows)
 
-                if (batch_end % 40000 == 0) or batch_end == n_s1:
+                if (batch_end % 20000 == 0) or batch_end == n_s1:
                     elapsed = time.time() - t1
                     print(f"    [{country}] {batch_end}/{n_s1} entities, {total_scored} pairs scored ({elapsed:.0f}s)")
                         
