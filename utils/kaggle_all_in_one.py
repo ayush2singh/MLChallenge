@@ -703,11 +703,28 @@ def run_inference(model, best_tau, test_dir, output_dir):
                     cand_list = [cand_ids[i] for i in hits]
                     batch_cand_pairs[s1_id] = cand_list
                     
+                    filtered_cand_list = []
                     for rank, cand_id in enumerate(cand_list, 1):
                         crec = cand_dict.get(cand_id)
-                        if crec:
-                            batch_feat_rows.append(compute_features(s1_rec, crec, rank))
-                            batch_pk.append((s1_id, cand_id))
+                        if not crec:
+                            continue
+                            
+                        # SMART PRE-SCORING VETO (Double the speed by skipping guaranteed failures)
+                        sp = s1_rec.get("postal_code", "") or ""
+                        cp = crec.get("postal_code", "") or ""
+                        if sp and cp and len(sp) >= 5 and len(cp) >= 5 and sp != cp:
+                            continue
+                            
+                        sn = s1_rec.get("s1_nums") or set()
+                        cn = crec.get("s1_nums") or set()
+                        if len(sn) >= 2 and len(cn) >= 2 and len(sn & cn) == 0:
+                            continue
+                            
+                        filtered_cand_list.append(cand_id)
+                        batch_feat_rows.append(compute_features(s1_rec, crec, rank))
+                        batch_pk.append((s1_id, cand_id))
+                        
+                    batch_cand_pairs[s1_id] = filtered_cand_list
 
                 # Score batch
                 all_matches_batch = {}
@@ -720,29 +737,9 @@ def run_inference(model, best_tau, test_dir, output_dir):
                     for (s1_id, cand_id), p in zip(batch_pk, probs):
                         s1_scored[s1_id].append((cand_id, float(p)))
 
-                    # Build O(1) lookup for S1 records (fixes O(N^2) linear scan bug)
-                    s1_rec_map = {r["entity_id"]: r for r in batch_recs}
-
                     for s1_id in batch_s1_ids:
                         candidates = s1_scored.get(s1_id, [])
-                        valid = []
-                        s1_rec_v = s1_rec_map.get(s1_id)
-                        for cand_id, prob in candidates:
-                            if prob < best_tau:
-                                continue
-                            # Smart postal veto
-                            if s1_rec_v:
-                                crec = cand_dict.get(cand_id)
-                                if crec:
-                                    sp = s1_rec_v.get("postal_code", "") or ""
-                                    cp = crec.get("postal_code", "") or ""
-                                    if sp and cp and len(sp) >= 5 and len(cp) >= 5 and sp != cp:
-                                        continue
-                                    sn = s1_rec_v.get("s1_nums") or set()
-                                    cn = crec.get("s1_nums") or set()
-                                    if len(sn) >= 2 and len(cn) >= 2 and len(sn & cn) == 0:
-                                        continue
-                            valid.append(cand_id)
+                        valid = [cand_id for cand_id, prob in candidates if prob >= best_tau]
                         all_matches_batch[s1_id] = valid
                 else:
                     for s1_id in batch_s1_ids:
