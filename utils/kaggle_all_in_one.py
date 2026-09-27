@@ -641,9 +641,13 @@ def run_inference(model, best_tau, test_dir, output_dir):
     del ts2, ts3
     gc.collect()
 
-    countries = sorted(list(set(
-        ts1["_country"].unique().to_list() + cand_all["_country"].unique().to_list()
-    )))
+    # Calculate sizes for each country
+    country_sizes = ts1.group_by("_country").agg(pl.len().alias("count")).to_dicts()
+    size_map = {r["_country"]: r["count"] for r in country_sizes}
+    
+    # Sort countries by size (descending) so India is processed first
+    unique_countries = list(set(ts1["_country"].unique().to_list() + cand_all["_country"].unique().to_list()))
+    countries = sorted(unique_countries, key=lambda c: size_map.get(c, 0), reverse=True)
     
     blocker = BlockingEngine(top_k=50)
 
