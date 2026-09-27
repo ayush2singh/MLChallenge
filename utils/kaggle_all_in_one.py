@@ -1,9 +1,11 @@
 # ==============================================================================
 # AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ENTITY RESOLUTION PIPELINE (KAGGLE)
 # ==============================================================================
-# v2.6 - Extreme Memory Fixes + Pre-Scoring Veto
+# v2.7 - O(1) Index Query + Extreme Memory Fixes
 #
-# NEW IN V2.6:
+# NEW IN V2.7:
+# - Fixes 30-minute batches in India by replacing O(N) np.nonzero with np.unique.
+# - Caps max_df to 10,000 to prevent stop-word index bloat.
 # - Replaces empty sets with None to save 5GB+ RAM across India.
 # - Preprocesses S1 candidates dynamically in batches of 10,000 (saves 8GB+ RAM).
 # - Uses Polars lazy extraction for countries to avoid allocating 25GB of Python dicts upfront.
@@ -34,7 +36,7 @@ import rapidfuzz.distance.Levenshtein as lev
 import rapidfuzz.fuzz as fuzz
 
 print("=" * 65)
-print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.6 (ULTRA-FAST)")
+print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.7 (ULTRA-FAST)")
 print("=" * 65)
 
 # ==============================================================================
