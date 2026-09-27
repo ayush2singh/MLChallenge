@@ -235,7 +235,7 @@ class BlockingEngine:
                     index[f"addr:{token}"].append(idx)
         # Max-DF filtering
         if n > 100:
-            max_postings = max(int(n * self.max_df_ratio), 50)
+            max_postings = min(max(int(n * self.max_df_ratio), 50), 10000)
             keys_to_remove = [k for k, v in index.items() if len(v) > max_postings]
             for k in keys_to_remove:
                 del index[k]
@@ -277,7 +277,9 @@ class BlockingEngine:
         
         # O(N) scoring using bincount instead of Python loops
         scores = np.bincount(flat_hits, weights=flat_weights)
-        nonzero_idx = np.nonzero(scores)[0]
+        
+        # Avoid scanning millions of zeroes by using unique hits
+        nonzero_idx = np.unique(flat_hits)
         nonzero_scores = scores[nonzero_idx]
         
         if len(nonzero_idx) <= self.top_k:
