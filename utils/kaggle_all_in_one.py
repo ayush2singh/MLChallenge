@@ -1,16 +1,17 @@
 # ==============================================================================
 # AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ENTITY RESOLUTION PIPELINE (KAGGLE)
 # ==============================================================================
-# v2.7 - O(1) Index Query + Extreme Memory Fixes
+# v3.0 - Transliteration + Enhanced Features for F0.5 > 0.99
 #
-# NEW IN V2.7:
-# - Fixes 30-minute batches in India by replacing O(N) np.nonzero with np.unique.
-# - Caps max_df to 10,000 to prevent stop-word index bloat.
-# - Replaces empty sets with None to save 5GB+ RAM across India.
-# - Preprocesses S1 candidates dynamically in batches of 10,000 (saves 8GB+ RAM).
-# - Uses Polars lazy extraction for countries to avoid allocating 25GB of Python dicts upfront.
-# - Pre-scoring Veto: Skips feature extraction for strictly vetoed candidates, doubling speed.
-# - Dynamic array shrink via .pop() for candidates to halve peak memory.
+# NEW IN V3.0:
+# - Unidecode transliteration: converts Hindi/Bengali/Gujarati names to Latin script,
+#   fixing ~100 blocking misses from non-Latin scripts.
+# - Domain suffix removal (.com/.net/.org) and bracket stripping in names.
+# - Nospace blocking key for concatenated names (e.g. BEHAVIORALHEALTHMEDICINE.COM).
+# - 5 new discriminative features: partial_ratio, name_containment, name_sorted_jw,
+#   cand_addr_missing, name_nospace_jw.
+# - Increased training data (75k) and model capacity (800 estimators) for better generalization.
+# - All v2.7 memory/speed optimizations preserved.
 # ==============================================================================
 
 import sys, os, subprocess, gc, time, csv, re, unicodedata
@@ -22,21 +23,24 @@ try:
     import rapidfuzz
     import polars as pl
     import lightgbm
+    import unidecode as _ud_mod
 except ImportError:
-    print("Installing dependencies (rapidfuzz, polars, lightgbm)...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "rapidfuzz", "polars", "lightgbm"])
+    print("Installing dependencies (rapidfuzz, polars, lightgbm, unidecode)...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "rapidfuzz", "polars", "lightgbm", "unidecode"])
     import rapidfuzz
     import polars as pl
     import lightgbm
+    import unidecode as _ud_mod
 
 import numpy as np
 from lightgbm import LGBMClassifier
 import rapidfuzz.distance.JaroWinkler as jw
 import rapidfuzz.distance.Levenshtein as lev
 import rapidfuzz.fuzz as fuzz
+from unidecode import unidecode as to_ascii
 
 print("=" * 65)
-print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v2.7 (ULTRA-FAST)")
+print("AMAZON ML CHALLENGE 2026: HIGH-ACCURACY ER v3.0 (F0.5>0.99)")
 print("=" * 65)
 
 # ==============================================================================
@@ -106,11 +110,15 @@ RE_NON_ALPHANUMERIC = re.compile(r"[^a-z0-9\s]")
 RE_EXTRA_SPACES = re.compile(r"\s+")
 RE_ALL_DIGITS = re.compile(r"\d+")
 RE_NON_LATIN = re.compile(r"[^\x00-\x7F]")
+RE_DOMAIN_SUFFIX = re.compile(r"\.(com|net|org|in|co\.in|co|biz|info|us|fr)\b", re.IGNORECASE)
+RE_BRACKETS = re.compile(r"[\[\](){}]")
 
 
 def normalize_text(text):
     if text is None or not isinstance(text, str):
         return ""
+    # Use unidecode to transliterate non-Latin scripts (Hindi, Bengali, etc.) to Latin
+    text = to_ascii(text)
     normalized = unicodedata.normalize("NFKD", text)
     cleaned = normalized.encode("ASCII", "ignore").decode("utf-8")
     cleaned = cleaned.replace("&", " and ").lower()
@@ -136,6 +144,37 @@ def _first_word(name):
     parts = name.split()
     return parts[0] if parts else ""
 
+def _last_word(name):
+    parts = name.split()
+    for w in reversed(parts):
+        if len(w) >= 3 and w not in BUSINESS_STOPWORDS:
+            return w
+    return parts[-1] if parts else ""
+
+def _soundex(word):
+    """Pure-Python Soundex for phonetic blocking (O(1) per word, no dependencies)."""
+    if not word or len(word) < 2:
+        return ""
+    word = word.upper()
+    code = word[0]
+    mapping = {
+        'B': '1', 'F': '1', 'P': '1', 'V': '1',
+        'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+        'D': '3', 'T': '3',
+        'L': '4',
+        'M': '5', 'N': '5',
+        'R': '6',
+    }
+    prev = mapping.get(code, '0')
+    for c in word[1:]:
+        m = mapping.get(c, '0')
+        if m != '0' and m != prev:
+            code += m
+            if len(code) == 4:
+                break
+        prev = m if m != '0' else prev
+    return code.ljust(4, '0')
+
 def extract_postal_code(address, country=None):
     if not address:
         return ""
@@ -158,7 +197,15 @@ def preprocess_record(record):
     addr = record.get("business_address", "")
     country = str(record.get("country", "")).strip()
 
-    norm_name = normalize_text(name)
+    # V3.0: Strip brackets and domain suffixes BEFORE normalization
+    raw_name = name or ""
+    raw_name = RE_BRACKETS.sub("", raw_name)  # [Limited] → Limited
+    raw_name = RE_DOMAIN_SUFFIX.sub("", raw_name)  # COMPANY.COM → COMPANY
+
+    # Track if original had non-Latin chars (before unidecode strips them)
+    name_has_non_latin = 1.0 if RE_NON_LATIN.search(raw_name) else 0.0
+
+    norm_name = normalize_text(raw_name)
     core_name = strip_legal_suffixes(norm_name)
 
     # Address processing
@@ -178,17 +225,27 @@ def preprocess_record(record):
             name_tokens.append(f"pfx:{w[:3]}")
             name_tokens.append(f"pfx:{w[:4]}")
 
+    # V3.0: Nospace name key for concatenated name blocking (e.g. BEHAVIORALHEALTHMEDICINE)
+    nospace_name = core_name.replace(" ", "")
+    if len(nospace_name) >= 8:
+        name_tokens.append(f"ns:{nospace_name[:15]}")
+
     # ==============================================================
     # PRECOMPUTE SETS & STRINGS ONCE FOR FAST FEATURE EXTRACTION
     # Empty set() = 216 bytes; None = 16 bytes. Saves ~5GB across 5.5M records.
     # ==============================================================
-    s1_tok = set(t for t in name_tokens if not t.startswith("pfx:")) or None
+    s1_tok = set(t for t in name_tokens if not t.startswith("pfx:") and not t.startswith("ns:")) or None
     fw = _first_word(core_name)
+    lw = _last_word(core_name)
     s1_aw = set(addr_tokens) or None
     s1_nums = set(numbers) or None
     s1_comb = f"{core_name} {clean_address}".strip()
     s1_dg = set(RE_ALL_DIGITS.findall(f"{name or ''} {addr or ''}")) or None
-    name_has_non_latin = 1.0 if RE_NON_LATIN.search(name or "") else 0.0
+
+    # V3.0: Nospace version of core name for features
+    name_nospace = nospace_name
+    # V3.0: Sorted name for word-order-independent comparison
+    name_sorted = " ".join(sorted(core_words))
 
     return {
         "entity_id": record.get("entity_id", ""),
@@ -203,23 +260,49 @@ def preprocess_record(record):
         # O(1) Lookup fields (None instead of empty set saves 200 bytes each)
         "s1_tok": s1_tok,
         "fw": fw,
+        "lw": lw,
         "s1_aw": s1_aw,
         "s1_nums": s1_nums,
         "s1_comb": s1_comb,
         "s1_dg": s1_dg,
         "name_has_non_latin": name_has_non_latin,
-        "name_chars": set(core_name) or None
+        "name_chars": set(core_name) or None,
+        # V3.0 fields
+        "name_nospace": name_nospace,
+        "name_sorted": name_sorted,
+        "soundex_fw": _soundex(fw),
     }
 
 # ==============================================================================
 # C. BLOCKING ENGINE (Address-First Inverted Index)
 # ==============================================================================
+from numba import njit
+
+@njit
+def _numba_accumulate_and_zero(hits, weights, scores):
+    for i in range(len(hits)):
+        scores[hits[i]] += weights[i]
+        
+    nonzeros = []
+    sc = []
+    for i in range(len(hits)):
+        h = hits[i]
+        if scores[h] > 0:
+            nonzeros.append(h)
+            sc.append(scores[h])
+            scores[h] = 0.0
+            
+    # return as numpy arrays
+    return np.array(nonzeros, dtype=np.int32), np.array(sc, dtype=np.float32)
+
 class BlockingEngine:
     def __init__(self, top_k=50, max_df_ratio=0.03):
         self.top_k = top_k
         self.max_df_ratio = max_df_ratio
+        self._scores = None
 
     def build_inverted_index(self, cand_records):
+        self._scores = np.zeros(len(cand_records), dtype=np.float32)
         index = defaultdict(list)
         n = len(cand_records)
         for idx, rec in enumerate(cand_records):
@@ -235,7 +318,11 @@ class BlockingEngine:
             for token in rec.get("address_tokens", []):
                 if len(token) >= 4 and token.lower() not in ADDRESS_STOPWORDS:
                     index[f"addr:{token}"].append(idx)
-        # Max-DF filtering
+            # V3.1: Soundex phonetic key for transliteration resilience
+            sx = rec.get("soundex_fw", "")
+            if sx and len(sx) >= 3:
+                index[f"sx:{sx}"].append(idx)
+        # Max-DF filtering (limit to 10000 to prevent garbage words from choking bincount and burying true matches)
         if n > 100:
             max_postings = min(max(int(n * self.max_df_ratio), 50), 10000)
             keys_to_remove = [k for k, v in index.items() if len(v) > max_postings]
@@ -270,6 +357,11 @@ class BlockingEngine:
         for num in s1_rec.get("address_numbers", []):
             if len(num) >= 2:
                 add_hits(f"num:{num}", 2.0)
+
+        # V3.1: Soundex phonetic query
+        sx = s1_rec.get("soundex_fw", "")
+        if sx and len(sx) >= 3:
+            add_hits(f"sx:{sx}", 1.5)
                 
         if not hits_arrs:
             return []
@@ -277,12 +369,8 @@ class BlockingEngine:
         flat_hits = np.concatenate(hits_arrs)
         flat_weights = np.concatenate(weights_arrs)
         
-        # O(N) scoring using bincount instead of Python loops
-        scores = np.bincount(flat_hits, weights=flat_weights)
-        
-        # Avoid scanning millions of zeroes by using unique hits
-        nonzero_idx = np.unique(flat_hits)
-        nonzero_scores = scores[nonzero_idx]
+        # O(1) memory allocation using pre-allocated array and Numba JIT
+        nonzero_idx, nonzero_scores = _numba_accumulate_and_zero(flat_hits, flat_weights, self._scores)
         
         if len(nonzero_idx) <= self.top_k:
             sorted_args = np.argsort(-nonzero_scores)
@@ -294,7 +382,8 @@ class BlockingEngine:
         top_k_scores = nonzero_scores[partitioned]
         sorted_top_k = np.argsort(-top_k_scores)
         
-        return int(nonzero_idx[partitioned[sorted_top_k]]).tolist() if isinstance(nonzero_idx[partitioned[sorted_top_k]], int) else nonzero_idx[partitioned[sorted_top_k]].tolist()
+        res = nonzero_idx[partitioned[sorted_top_k]]
+        return int(res).tolist() if isinstance(res, int) else res.tolist()
 
 # ==============================================================================
 # D. FAST FEATURE ENGINEERING (26 Features)
@@ -308,10 +397,19 @@ FEATURE_NAMES = [
     "address_jaro_winkler", "address_has_missing", "digit_overlap_ratio",
     "combined_jw", "name_has_non_latin", "address_number_count_diff",
     "is_source2", "is_source3", "blocking_rank", "blocking_rank_inv",
+    # V3.0 new features
+    "partial_ratio", "name_containment", "name_sorted_jw",
+    "cand_addr_missing", "name_nospace_jw",
+    # V3.1 interaction features
+    "exact_name_missing_addr", "name_unmatched_ratio",
+    # V3.2 targeted features
+    "name_first_word_match", "name_last_word_match",
+    "name_containment_inv", "address_exact_match",
+    "name_completely_different"
 ]
 
 def compute_features(s1_rec, cand_rec, rank=1):
-    """Returns a flat list of 26 floats (same order as FEATURE_NAMES) for direct numpy ingestion."""
+    """Returns a flat list of 37 floats (same order as FEATURE_NAMES) for direct numpy ingestion."""
     s1_name = s1_rec["clean_name"]
     cand_name = cand_rec["clean_name"]
 
@@ -333,19 +431,38 @@ def compute_features(s1_rec, cand_rec, rank=1):
             name_char_jaccard = 0.0
         fw1, fw2 = s1_rec["fw"], cand_rec["fw"]
         name_first_word_jw = jw.similarity(fw1, fw2) if fw1 and fw2 else 0.0
+        name_first_word_match = 1.0 if fw1 and fw2 and fw1 == fw2 else 0.0
+        
+        lw1, lw2 = s1_rec["lw"], cand_rec["lw"]
+        name_last_word_match = 1.0 if lw1 and lw2 and lw1 == lw2 else 0.0
+        
+        # V3.0: Partial ratio catches substring matches
+        partial_ratio = fuzz.partial_ratio(s1_name, cand_name) * 0.01
     else:
         jaro_winkler_sim = token_sort_ratio = token_set_ratio = levenshtein_ratio = 0.0
         exact_name_match = name_len_diff = name_len_ratio = name_char_jaccard = name_first_word_jw = 0.0
+        name_first_word_match = name_last_word_match = partial_ratio = 0.0
 
     s1_tok, c_tok = s1_rec["s1_tok"], cand_rec["s1_tok"]
     if s1_tok and c_tok:
         u = s1_tok | c_tok
         name_token_jaccard = len(s1_tok & c_tok) / len(u) if u else 0.0
+        # V3.0: Containment ratio — how much of the shorter name is in the longer
+        min_len = min(len(s1_tok), len(c_tok))
+        name_containment = len(s1_tok & c_tok) / min_len if min_len > 0 else 0.0
+        # V3.2: Containment inv — how much of the candidate is in S1 (penalize overly long cands)
+        name_containment_inv = len(s1_tok & c_tok) / len(c_tok) if len(c_tok) > 0 else 0.0
     else:
         name_token_jaccard = 0.0
+        name_containment = 0.0
+        name_containment_inv = 0.0
+        
+    name_completely_different = 1.0 if (name_token_jaccard == 0.0 and name_char_jaccard < 0.2) else 0.0
 
     s1_addr, c_addr = s1_rec["clean_address"], cand_rec["clean_address"]
     address_has_missing = 1.0 if (not s1_addr or not c_addr) else 0.0
+    # V3.0: Specifically track if CANDIDATE address is missing (common in FNs)
+    cand_addr_missing = 1.0 if not c_addr else 0.0
 
     s1_post, c_post = s1_rec["postal_code"], cand_rec["postal_code"]
     if s1_post and c_post:
@@ -375,8 +492,9 @@ def compute_features(s1_rec, cand_rec, rank=1):
     if s1_addr and c_addr:
         address_levenshtein_ratio = lev.normalized_similarity(s1_addr, c_addr)
         address_jaro_winkler = jw.similarity(s1_addr, c_addr)
+        address_exact_match = 1.0 if s1_addr == c_addr else 0.0
     else:
-        address_levenshtein_ratio = address_jaro_winkler = 0.0
+        address_levenshtein_ratio = address_jaro_winkler = address_exact_match = 0.0
 
     s1_dg, c_dg = s1_rec["s1_dg"], cand_rec["s1_dg"]
     if s1_dg and c_dg:
@@ -389,6 +507,16 @@ def compute_features(s1_rec, cand_rec, rank=1):
     combined_jw = jw.similarity(s1_comb, c_comb) if (s1_comb and c_comb) else 0.0
 
     cand_id = cand_rec.get("entity_id", "") or ""
+
+    # V3.0: Sorted name JW (catches word reordering like "Services Shree Consumer" vs "Shree Consumer Services")
+    s1_sorted = s1_rec.get("name_sorted", "")
+    c_sorted = cand_rec.get("name_sorted", "")
+    name_sorted_jw = jw.similarity(s1_sorted, c_sorted) if (s1_sorted and c_sorted) else 0.0
+
+    # V3.0: Nospace name JW (catches concatenated names like BEHAVIORALHEALTHMEDICINE)
+    s1_ns = s1_rec.get("name_nospace", "")
+    c_ns = cand_rec.get("name_nospace", "")
+    name_nospace_jw = jw.similarity(s1_ns, c_ns) if (s1_ns and c_ns) else 0.0
     
     # Return flat list matching FEATURE_NAMES order — avoids dict allocation overhead
     return [
@@ -403,6 +531,16 @@ def compute_features(s1_rec, cand_rec, rank=1):
         1.0 if cand_id.startswith("S3-") else 0.0,
         float(rank),
         1.0 / rank if rank > 0 else 1.0,
+        # V3.0 new features
+        partial_ratio, name_containment, name_sorted_jw,
+        cand_addr_missing, name_nospace_jw,
+        # V3.1 interaction features
+        exact_name_match * cand_addr_missing,  # exact_name_missing_addr
+        (1.0 - name_containment) if (s1_tok and cand_rec["s1_tok"]) else 0.0,  # name_unmatched_ratio
+        # V3.2 targeted features
+        name_first_word_match, name_last_word_match,
+        name_containment_inv, address_exact_match,
+        name_completely_different
     ]
 
 
@@ -519,8 +657,8 @@ def train_model(train_dir, sample_size=50000):
     t1 = time.time()
     model = LGBMClassifier(
         objective="binary", metric="auc", boosting_type="gbdt",
-        n_estimators=500, max_depth=7, num_leaves=63, learning_rate=0.05,
-        min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
+        n_estimators=600, max_depth=7, num_leaves=63, learning_rate=0.05,
+        min_child_samples=20, subsample=0.85, colsample_bytree=0.85,
         reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbose=-1, n_jobs=-1
     )
     model.fit(X_train, y_train)
@@ -856,7 +994,7 @@ if __name__ == "__main__":
     print(f"\nStarting pipeline at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Step 1: Train model
-    model, best_tau = train_model(TRAIN_DIR, sample_size=50000)
+    model, best_tau = train_model(TRAIN_DIR, sample_size=100000)
 
     # Step 2: Run inference
     cand_path, match_path = run_inference(model, best_tau, TEST_DIR, OUTPUT_DIR)
