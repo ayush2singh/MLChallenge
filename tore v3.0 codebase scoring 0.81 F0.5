@@ -1,0 +1,134 @@
+[33mcommit 9dd11bc101673c381f32ec73fa059f8f4660eb66[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sun Sep 27 09:13:32 2026 +0530
+
+    Sort countries by size descending so India is processed first
+
+ utils/kaggle_all_in_one.py | 10 [32m+++++++[m[31m---[m
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+[33mcommit 93aed2ca7c9c5e9a75dd3e249cd7ef8374e1fc2b[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sun Sep 27 09:09:33 2026 +0530
+
+    Bump header version to v2.7
+
+ utils/kaggle_all_in_one.py | 8 [32m+++++[m[31m---[m
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+[33mcommit eb9d61e8c6d91f30c8630c3d97e1f79f0c243a7e[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sun Sep 27 09:08:53 2026 +0530
+
+    v2.7: Optimize blocking engine to prevent O(N) scanning of 4.7 million elements per query. This completely fixes India's 30-minute batch crawl.
+
+ utils/kaggle_all_in_one.py | 6 [32m++++[m[31m--[m
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+[33mcommit 29380e682c29be25bd222b20a0162f280aa1b892[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:48:49 2026 +0530
+
+    Bump header version to v2.6 to reflect all memory and speed optimizations
+
+ utils/kaggle_all_in_one.py | 15 [32m++++++++[m[31m-------[m
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+[33mcommit 62bf250a269725e26ba35498525494a857e72510[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:42:54 2026 +0530
+
+    v2.6: Restore dynamic shrinking via .pop() for candidates to halve peak RAM
+
+ utils/kaggle_all_in_one.py | 6 [32m++++[m[31m--[m
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+[33mcommit 6b09aff39d60974fdb0b92a86e6ac152129156c1[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:40:17 2026 +0530
+
+    v2.5: Pre-scoring Veto Optimization. Skips slow feature calculation and LGBM inference for strictly vetoed candidates. Doubles inference speed without changing F0.5 score.
+
+ utils/kaggle_all_in_one.py | 45 [32m+++++++++++++++++++++[m[31m------------------------[m
+ 1 file changed, 21 insertions(+), 24 deletions(-)
+
+[33mcommit 3490048b7e981563e103319fb4b19ca9e1ee5214[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:37:21 2026 +0530
+
+    v2.4 complete: Batch S1 preprocessing + None-safe feature extraction
+
+ utils/kaggle_all_in_one.py | 37 [32m++++++++++++++++++++[m[31m-----------------[m
+ 1 file changed, 20 insertions(+), 17 deletions(-)
+
+[33mcommit b8417cd12fdce9e765f9797eb654bc8f067adccd[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:32:26 2026 +0530
+
+    v2.4 final: Polars lazy extraction + None for empty sets
+
+ utils/kaggle_all_in_one.py | 20 [32m+++++++++++[m[31m---------[m
+ 1 file changed, 11 insertions(+), 9 deletions(-)
+
+[33mcommit 767b6e0b272ab72412b2b992d16852df712d7943[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 22:25:01 2026 +0530
+
+    v2.4: Extreme Memory Optimization for massive partitions (India). Saves 15GB+ RAM by filtering directly from Polars and using None instead of empty Sets
+
+ utils/kaggle_all_in_one.py | 32 [32m++++++++++++++[m[31m------------------[m
+ 1 file changed, 14 insertions(+), 18 deletions(-)
+
+[33mcommit 498c07f8dacdd52797b4f19d080351cad4981dac[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 20:21:35 2026 +0530
+
+    Bump version to v2.3 in header
+
+ utils/kaggle_all_in_one.py | 14 [32m+++++++[m[31m-------[m
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+[33mcommit eb73fe7ef901b7109b4d454854268b3a4bbbaba8[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 20:15:24 2026 +0530
+
+    v2.3: Fix O(N^2) veto bug, eliminate pandas, use numpy arrays directly
+
+ utils/kaggle_all_in_one.py | 112 [32m++++++++++++++++++++++++[m[31m---------------------[m
+ 1 file changed, 60 insertions(+), 52 deletions(-)
+
+[33mcommit dca909cb94e53388f982688cdaf705ad0f556bf0[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 20:10:02 2026 +0530
+
+    Fix memory leak in inference loop causing Kaggle swap death
+
+ utils/kaggle_all_in_one.py | 8 [32m++++[m[31m----[m
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+[33mcommit 2d9ef84b954686c070383135c74d386712f4e7f5[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 19:34:51 2026 +0530
+
+    Optimize BlockingEngine with numpy vectorize to speed up blocking from hours to minutes
+
+ utils/kaggle_all_in_one.py | 58 [32m++++++++++++++++++++++++++++++++[m[31m--------------[m
+ 1 file changed, 41 insertions(+), 17 deletions(-)
+
+[33mcommit c382f3d5ad3dd5423db52e6eb84c45c8db394cac[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 19:14:25 2026 +0530
+
+    Update kaggle_all_in_one.py to v2.2 (Ultra-Fast Single Thread Algorithmic Optimization)
+
+ utils/kaggle_all_in_one.py | 327 [32m+++++++++++++++++++++[m[31m------------------------[m
+ 1 file changed, 150 insertions(+), 177 deletions(-)
+
+[33mcommit aba4ada447e120abec61921b2805b538251677e3[m
+Author: ayush2singh <ayush860463@gmail.com>
+Date:   Sat Sep 26 17:41:07 2026 +0530
+
+    Update kaggle_all_in_one.py to v2.1 (multithreading and checkpointing)
+
+ utils/kaggle_all_in_one.py | 855 [32m+++++++++++++++++++++++++++++++++++++++++++++[m
+ 1 file changed, 855 insertions(+)
