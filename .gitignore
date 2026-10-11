@@ -1,0 +1,64 @@
+# ------------------------------------------------------------------
+# Python / ML project – ignore unnecessary files and directories
+# ------------------------------------------------------------------
+# Byte‑compiled / optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+*.tar.gz
+*.zip
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# VS Code / IDE settings
+.vscode/
+.idea/
+*.iml
+
+# OS‑generated files
+.DS_Store
+Thumbs.db
+
+# Project‑specific generated artefacts (exclude planning)
+.planning/
+
+# Miscellaneous
+*.log
+*.tmp
+
+# Additional project‑specific exclusions – large data, generated files,
+# submission bundles, and other artefacts that should not be version‑controlled
+# ------------------------------------------------------------------
+# Dataset archives and raw data directories
+/dataset/
+*.zip
+*.tsv
+*.csv
+
+# Model / benchmark submission bundles
+Zenith_submission.zip
+benchmark_local.py
+
+# Generated output / intermediate results
+output/
+
+# Any other heavy or temporary files that may appear
+*.bak
+*.tmp
+
+# End of .gitignore

@@ -1,0 +1,7 @@
+{
+  "mode": "agentic",
+  "workflow": "gsd-new-project",
+  "target_platform": "kaggle",
+  "data_scale": "50-100GB",
+  "time_budget_hours": 72
+}
